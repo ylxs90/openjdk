@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2001, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2001, 2023, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -55,8 +55,9 @@
 #include "oops/instanceRefKlass.hpp"
 #include "oops/oop.inline.hpp"
 #include "runtime/java.hpp"
+#include "runtime/javaThread.hpp"
 #include "runtime/prefetch.inline.hpp"
-#include "runtime/thread.inline.hpp"
+#include "runtime/threads.hpp"
 #include "utilities/align.hpp"
 #include "utilities/copy.hpp"
 #include "utilities/globalDefinitions.hpp"
@@ -126,7 +127,7 @@ void CLDScanClosure::do_cld(ClassLoaderData* cld) {
     // Clean the cld since we're going to scavenge all the metadata.
     cld->oops_do(_scavenge_closure, ClassLoaderData::_claim_none, /*clear_modified_oops*/true);
 
-    _scavenge_closure->set_scanned_cld(NULL);
+    _scavenge_closure->set_scanned_cld(nullptr);
   }
 }
 
@@ -180,11 +181,13 @@ DefNewGeneration::DefNewGeneration(ReservedSpace rs,
 
   compute_space_boundaries(0, SpaceDecorator::Clear, SpaceDecorator::Mangle);
   update_counters();
-  _old_gen = NULL;
+  _old_gen = nullptr;
   _tenuring_threshold = MaxTenuringThreshold;
   _pretenure_size_threshold_words = PretenureSizeThreshold >> LogHeapWordSize;
 
-  _gc_timer = new (ResourceObj::C_HEAP, mtGC) STWGCTimer();
+  _gc_timer = new STWGCTimer();
+
+  _gc_tracer = new DefNewTracer();
 }
 
 void DefNewGeneration::compute_space_boundaries(uintx minimum_eden_size,
@@ -268,7 +271,7 @@ void DefNewGeneration::compute_space_boundaries(uintx minimum_eden_size,
   // The to-space is normally empty before a compaction so need
   // not be considered.  The exception is during promotion
   // failure handling when to-space can contain live objects.
-  from()->set_next_compaction_space(NULL);
+  from()->set_next_compaction_space(nullptr);
 }
 
 void DefNewGeneration::swap_spaces() {
@@ -279,7 +282,7 @@ void DefNewGeneration::swap_spaces() {
   // The to-space is normally empty before a compaction so need
   // not be considered.  The exception is during promotion
   // failure handling when to-space can contain live objects.
-  from()->set_next_compaction_space(NULL);
+  from()->set_next_compaction_space(nullptr);
 
   if (UsePerfData) {
     CSpaceCounters* c = _from_counters;
@@ -457,9 +460,6 @@ size_t DefNewGeneration::contiguous_available() const {
 }
 
 
-HeapWord* volatile* DefNewGeneration::top_addr() const { return eden()->top_addr(); }
-HeapWord** DefNewGeneration::end_addr() const { return eden()->end_addr(); }
-
 void DefNewGeneration::object_iterate(ObjectClosure* blk) {
   eden()->object_iterate(blk);
   from()->object_iterate(blk);
@@ -482,7 +482,7 @@ HeapWord* DefNewGeneration::allocate_from_space(size_t size) {
   // again later with the Heap_lock held.
   bool do_alloc = should_try_alloc && (Heap_lock->owned_by_self() || (SafepointSynchronize::is_at_safepoint() && Thread::current()->is_VM_thread()));
 
-  HeapWord* result = NULL;
+  HeapWord* result = nullptr;
   if (do_alloc) {
     result = from()->allocate(size);
   }
@@ -495,7 +495,7 @@ HeapWord* DefNewGeneration::allocate_from_space(size_t size) {
                         from()->free(),
                         should_try_alloc ? "" : "  should_allocate_from_space: NOT",
                         do_alloc ? "  Heap_lock is not owned by self" : "",
-                        result == NULL ? "NULL" : "object");
+                        result == nullptr ? "null" : "object");
 
   return result;
 }
@@ -530,8 +530,7 @@ void DefNewGeneration::collect(bool   full,
   SerialHeap* heap = SerialHeap::heap();
 
   _gc_timer->register_gc_start();
-  DefNewTracer gc_tracer;
-  gc_tracer.report_gc_start(heap->gc_cause(), _gc_timer->gc_start());
+  _gc_tracer->report_gc_start(heap->gc_cause(), _gc_timer->gc_start());
 
   _old_gen = heap->old_gen();
 
@@ -547,9 +546,9 @@ void DefNewGeneration::collect(bool   full,
 
   init_assuming_no_promotion_failure();
 
-  GCTraceTime(Trace, gc, phases) tm("DefNew", NULL, heap->gc_cause());
+  GCTraceTime(Trace, gc, phases) tm("DefNew", nullptr, heap->gc_cause());
 
-  heap->trace_heap_before_gc(&gc_tracer);
+  heap->trace_heap_before_gc(_gc_tracer);
 
   // These can be shared for all code paths
   IsAliveClosure is_alive(this);
@@ -592,8 +591,8 @@ void DefNewGeneration::collect(bool   full,
   ReferenceProcessorPhaseTimes pt(_gc_timer, rp->max_num_queues());
   SerialGCRefProcProxyTask task(is_alive, keep_alive, evacuate_followers);
   const ReferenceProcessorStats& stats = rp->process_discovered_references(task, pt);
-  gc_tracer.report_gc_reference_stats(stats);
-  gc_tracer.report_tenuring_threshold(tenuring_threshold());
+  _gc_tracer->report_gc_reference_stats(stats);
+  _gc_tracer->report_tenuring_threshold(tenuring_threshold());
   pt.print_all_references();
 
   assert(heap->no_allocs_since_save_marks(), "save marks have not been newly set.");
@@ -647,7 +646,7 @@ void DefNewGeneration::collect(bool   full,
 
     // Inform the next generation that a promotion failure occurred.
     _old_gen->promotion_failure_occurred();
-    gc_tracer.report_promotion_failed(_promotion_failed_info);
+    _gc_tracer->report_promotion_failed(_promotion_failed_info);
 
     // Reset the PromotionFailureALot counters.
     NOT_PRODUCT(heap->reset_promotion_should_fail();)
@@ -655,17 +654,17 @@ void DefNewGeneration::collect(bool   full,
   // We should have processed and cleared all the preserved marks.
   _preserved_marks_set.reclaim();
 
-  heap->trace_heap_after_gc(&gc_tracer);
+  heap->trace_heap_after_gc(_gc_tracer);
 
   _gc_timer->register_gc_end();
 
-  gc_tracer.report_gc_end(_gc_timer->gc_end(), _gc_timer->time_partitions());
+  _gc_tracer->report_gc_end(_gc_timer->gc_end(), _gc_timer->time_partitions());
 }
 
 void DefNewGeneration::init_assuming_no_promotion_failure() {
   _promotion_failed = false;
   _promotion_failed_info.reset();
-  from()->set_next_compaction_space(NULL);
+  from()->set_next_compaction_space(nullptr);
 }
 
 void DefNewGeneration::remove_forwarding_pointers() {
@@ -688,7 +687,7 @@ void DefNewGeneration::remove_forwarding_pointers() {
 }
 
 void DefNewGeneration::restore_preserved_marks() {
-  _preserved_marks_set.restore(NULL);
+  _preserved_marks_set.restore(nullptr);
 }
 
 void DefNewGeneration::handle_promotion_failure(oop old) {
@@ -717,7 +716,7 @@ oop DefNewGeneration::copy_to_survivor_space(oop old) {
   assert(is_in_reserved(old) && !old->is_forwarded(),
          "shouldn't be scavenging this oop");
   size_t s = old->size();
-  oop obj = NULL;
+  oop obj = nullptr;
 
   // Try allocating obj in to-space (unless too old)
   if (old->age() < tenuring_threshold()) {
@@ -726,9 +725,9 @@ oop DefNewGeneration::copy_to_survivor_space(oop old) {
 
   bool new_obj_is_tenured = false;
   // Otherwise try allocating obj tenured
-  if (obj == NULL) {
+  if (obj == nullptr) {
     obj = _old_gen->promote(old, s);
-    if (obj == NULL) {
+    if (obj == nullptr) {
       handle_promotion_failure(old);
       return old;
     }
@@ -770,13 +769,6 @@ void DefNewGeneration::save_marks() {
   eden()->set_saved_mark();
   to()->set_saved_mark();
   from()->set_saved_mark();
-}
-
-
-void DefNewGeneration::reset_saved_marks() {
-  eden()->reset_saved_mark();
-  to()->reset_saved_mark();
-  from()->reset_saved_mark();
 }
 
 
@@ -824,7 +816,7 @@ bool DefNewGeneration::collection_attempt_is_safe() {
     log_trace(gc)(":: to is not empty ::");
     return false;
   }
-  if (_old_gen == NULL) {
+  if (_old_gen == nullptr) {
     GenCollectedHeap* gch = GenCollectedHeap::heap();
     _old_gen = gch->old_gen();
   }
@@ -869,9 +861,6 @@ void DefNewGeneration::gc_epilogue(bool full) {
     } else if (seen_incremental_collection_failed) {
       log_trace(gc)("DefNewEpilogue: cause(%s), not full, seen_failed, will_clear_seen_failed",
                             GCCause::to_string(gch->gc_cause()));
-      assert(gch->gc_cause() == GCCause::_scavenge_alot ||
-             !gch->incremental_collection_failed(),
-             "Twice in a row");
       seen_incremental_collection_failed = false;
     }
 #endif // ASSERT
@@ -937,7 +926,7 @@ HeapWord* DefNewGeneration::allocate(size_t word_size, bool is_tlab) {
   // Note that since DefNewGeneration supports lock-free allocation, we
   // have to use it here, as well.
   HeapWord* result = eden()->par_allocate(word_size);
-  if (result == NULL) {
+  if (result == nullptr) {
     // If the eden is full and the last collection bailed out, we are running
     // out of heap space, and we try to allocate the from-space, too.
     // allocate_from_space can't be inlined because that would introduce a

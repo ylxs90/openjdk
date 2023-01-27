@@ -23,10 +23,11 @@
 
 /**
  * @test
- * @summary Basic test for JFR jdk.VirtualThreadXXX events.
+ * @summary Basic test for JFR jdk.VirtualThreadXXX events
+ * @requires vm.continuations
  * @modules jdk.jfr java.base/java.lang:+open
- * @compile --enable-preview -source ${jdk.version} JfrEvents.java
- * @run testng/othervm --enable-preview JfrEvents
+ * @enablePreview
+ * @run testng/othervm JfrEvents
  */
 
 import java.io.IOException;

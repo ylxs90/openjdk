@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2001, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2001, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -32,6 +32,7 @@
 #include "gc/shared/genOopClosures.inline.hpp"
 #include "gc/shared/space.inline.hpp"
 #include "oops/access.inline.hpp"
+#include "utilities/devirtualizer.inline.hpp"
 
 // Methods of protected closure types
 
@@ -90,11 +91,12 @@ inline void DefNewGeneration::FastKeepAliveClosure::do_oop_work(T* p) {
 
 template <typename OopClosureType>
 void DefNewGeneration::oop_since_save_marks_iterate(OopClosureType* cl) {
-  eden()->oop_since_save_marks_iterate(cl);
-  to()->oop_since_save_marks_iterate(cl);
-  from()->oop_since_save_marks_iterate(cl);
+  // No allocation in eden and from spaces, so no iteration required.
+  assert(eden()->saved_mark_at_top(), "inv");
+  assert(from()->saved_mark_at_top(), "inv");
 
-  save_marks();
+  to()->oop_since_save_marks_iterate(cl);
+  to()->set_saved_mark();
 }
 
 #endif // SHARE_GC_SERIAL_DEFNEWGENERATION_INLINE_HPP
